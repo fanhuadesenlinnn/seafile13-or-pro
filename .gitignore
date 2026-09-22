@@ -1,0 +1,13 @@
+# Generated deployments, credentials, volumes and configuration backups
+/deployments/
+.env
+.env.*
+!.env.example
+/data/
+/config-backups/
+.operation-lock/
+*.before-deploy-*
+__pycache__/
+*.py[cod]
+.DS_Store
+/test-results/
