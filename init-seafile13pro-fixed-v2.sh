@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Seafile 13 Community Edition. Bash 3.2+, OpenSSL, Docker Compose v2.20+.
+# Seafile 13 Professional Edition. Bash 3.2+, OpenSSL, Docker Compose v2.20+.
 # One distributable script; no template downloads and no host Python dependency.
 set -euo pipefail
 umask 077
@@ -10,7 +10,7 @@ umask 077
 
 # ==================== 常用修改配置 ====================
 # 部署目录：保存配置和数据；运行时指定的第一个目录参数优先。
-DEPLOY_DIR="${DEPLOY_DIR:-./deployments/seafile13-ce}"
+DEPLOY_DIR="${DEPLOY_DIR:-./deployments/seafile13-pro}"
 # 访问域名或内网 IPv4，例如 files.example.com 或 192.168.1.100；不带协议和端口。
 # 留空尝试检测本机 IP；建议明确填写，宿主机和容器都必须能访问此地址。
 SEAFILE_SERVER_HOSTNAME="${SEAFILE_SERVER_HOSTNAME:-}"
@@ -25,7 +25,7 @@ INIT_SEAFILE_ADMIN_EMAIL="${INIT_SEAFILE_ADMIN_EMAIL:-admin@example.com}"
 # 镜像下载代理：留空直连；例如 mirror.example.com，不带 http:// 或 https://。
 IMAGE_PREFIX="${IMAGE_PREFIX:-}"
 # 容器名称前缀：部署多个实例时，分别设置不同前缀、部署目录和入口端口。
-CONTAINER_PREFIX="${CONTAINER_PREFIX:-seafile13ce}"
+CONTAINER_PREFIX="${CONTAINER_PREFIX:-seafile13pro}"
 
 # ==================== 一般不需要修改配置 ====================
 # 时区：中国大陆一般保持 Asia/Shanghai。
@@ -52,24 +52,23 @@ DOCKER_COMPOSE_COMMAND="${DOCKER_COMPOSE_COMMAND:-}"
 DOCKER_SOCKET="${DOCKER_SOCKET:-}"
 
 # --- 镜像版本：首次部署需要固定版本或 digest 时修改 ---
-SEAFILE_IMAGE="${SEAFILE_IMAGE:-seafileltd/seafile-mc:13.0-latest}" # 社区版主服务
+SEAFILE_IMAGE="${SEAFILE_IMAGE:-seafileltd/seafile-pro-mc:13.0-latest}" # 专业版主服务
 SEAFILE_DB_IMAGE="${SEAFILE_DB_IMAGE:-mariadb:10.11}" # 数据库
 SEAFILE_REDIS_IMAGE="${SEAFILE_REDIS_IMAGE:-redis:7-alpine}" # 缓存与事件队列
 SEAFILE_CADDY_IMAGE="${SEAFILE_CADDY_IMAGE:-lucaslorentz/caddy-docker-proxy:2.12-alpine}" # 统一访问入口
+SEASEARCH_IMAGE="${SEASEARCH_IMAGE:-}" # 留空自动选架构；ARM 使用 nomkl 镜像
 SEADOC_IMAGE="${SEADOC_IMAGE:-seafileltd/sdoc-server:2.0-latest}" # 在线文档与 Wiki
 ONLYOFFICE_IMAGE="${ONLYOFFICE_IMAGE:-onlyoffice/documentserver:8.1.0.1}" # Office 预览与编辑
 MD_IMAGE="${MD_IMAGE:-seafileltd/seafile-md-server:13.0-latest}" # 文件扩展属性
 NOTIFICATION_SERVER_IMAGE="${NOTIFICATION_SERVER_IMAGE:-seafileltd/notification-server:13.0-latest}" # 实时通知
-THUMBNAIL_SERVER_IMAGE="${THUMBNAIL_SERVER_IMAGE:-seafileltd/thumbnail-server:13.0-latest}" # 缩略图
 
 # --- 功能限制：按资料库大小和服务器资源调整 ---
 MD_FILE_COUNT_LIMIT="${MD_FILE_COUNT_LIMIT:-100000}" # 单个资料库启用元数据管理的文件数上限
-THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT="${THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT:-256}" # 缩略图服务允许的原图大小上限，单位 MB
 # ==================== 配置区结束 ====================
 fail() { echo "错误: $*" >&2; exit 2; }
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   cat <<'HELP'
-用法: bash init-seafile13ce.sh [部署目录]
+用法: bash init-seafile13pro-fixed-v2.sh [部署目录]
 仅初始化新部署，可设置配置区的同名环境变量；已有部署目录不会覆盖。
 GENERATE_ONLY=1 只生成配置，不访问 Docker daemon、不拉取镜像。
 PULL=1 显式拉取镜像；DEPLOY_TIMEOUT=600；VERIFY_TIMEOUT=300。
@@ -84,7 +83,14 @@ mkdir -p "${1:-$DEPLOY_DIR}"
 TARGET="$(cd "${1:-$DEPLOY_DIR}" && pwd)"
 # Reject a concurrent generator/deployer; stale locks are removable after checking processes.
 mkdir "$TARGET/.operation-lock" 2>/dev/null || fail '已有操作或遗留 .operation-lock；确认无操作后再移除锁目录'
-trap 'rm -f "$TARGET/.env.new"; rmdir "$TARGET/.operation-lock" 2>/dev/null || true' EXIT
+STAGE=''
+DEPLOY_TARGET="$TARGET"
+cleanup_generator() {
+  rm -f "$DEPLOY_TARGET/.env.new"
+  if [[ -n "$STAGE" && "$STAGE" == "$DEPLOY_TARGET"/.generated.* ]]; then rm -rf "$STAGE"; fi
+  rmdir "$DEPLOY_TARGET/.operation-lock" 2>/dev/null || true
+}
+trap cleanup_generator EXIT
 for entry in "$TARGET"/* "$TARGET"/.[!.]* "$TARGET"/..?*; do
   [[ -e "$entry" || -L "$entry" ]] || continue
   [[ "$entry" == "$TARGET/.operation-lock" ]] || fail '本脚本只初始化新部署；请使用空部署目录，或自行清理旧目录后重试'
@@ -142,13 +148,26 @@ fi
 IMAGE_PREFIX="${IMAGE_PREFIX%/}"
 [[ -z "$IMAGE_PREFIX" ]] || IMAGE_PREFIX="$IMAGE_PREFIX/"
 COMPOSE_PROJECT_NAME="$(printf '%s' "$CONTAINER_PREFIX" | tr '[:upper:].' '[:lower:]_')"
-DEPLOYMENT_KIND=seafile13-ce-v1
+DEPLOYMENT_KIND=seafile13-pro-v1
+INIT_SS_ADMIN_USER=seasearch-admin
+INIT_SS_ADMIN_PASSWORD="$(openssl rand -hex 24)"
+SEASEARCH_TOKEN="$(printf '%s' "$INIT_SS_ADMIN_USER:$INIT_SS_ADMIN_PASSWORD" | base64 | tr -d '\r\n')"
+if [[ -z "$SEASEARCH_IMAGE" ]]; then
+  arch="$(uname -m)"
+  if [[ "$GENERATE_ONLY" != 1 ]]; then
+    arch="$("$DOCKER_COMMAND" info --format '{{.Architecture}}')"
+  fi
+  case "$arch" in
+    arm64|aarch64) SEASEARCH_IMAGE=seafileltd/seasearch-nomkl:1.0-latest ;;
+    *) SEASEARCH_IMAGE=seafileltd/seasearch:1.0-latest ;;
+  esac
+fi
 for key in INIT_SEAFILE_MYSQL_ROOT_PASSWORD SEAFILE_MYSQL_DB_PASSWORD REDIS_PASSWORD INIT_SEAFILE_ADMIN_PASSWORD JWT_PRIVATE_KEY ONLYOFFICE_JWT_SECRET; do
   printf -v "$key" '%s' "$(openssl rand -hex 24)"
 done
 # Atomic file publication; do not leave a partial .env after failure.
 : > "$TARGET/.env.new"
-for key in DEPLOYMENT_KIND COMPOSE_PROJECT_NAME CONTAINER_PREFIX SEAFILE_SERVER_HOSTNAME SEAFILE_SERVER_PROTOCOL EXTERNAL_REVERSE_PROXY CADDY_HOST_PORT CADDY_CONTAINER_PORT CADDY_BIND_ADDRESS CADDY_SITE CADDY_TRUSTED_PROXIES TIME_ZONE INIT_SEAFILE_ADMIN_EMAIL INIT_SEAFILE_ADMIN_PASSWORD INIT_SEAFILE_MYSQL_ROOT_PASSWORD SEAFILE_MYSQL_DB_PASSWORD REDIS_PASSWORD JWT_PRIVATE_KEY ONLYOFFICE_JWT_SECRET IMAGE_PREFIX DOCKER_COMMAND DOCKER_COMPOSE_COMMAND DOCKER_SOCKET SEAFILE_IMAGE SEAFILE_DB_IMAGE SEAFILE_REDIS_IMAGE SEAFILE_CADDY_IMAGE SEADOC_IMAGE ONLYOFFICE_IMAGE MD_IMAGE NOTIFICATION_SERVER_IMAGE THUMBNAIL_SERVER_IMAGE MD_FILE_COUNT_LIMIT THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT; do
+for key in DEPLOYMENT_KIND COMPOSE_PROJECT_NAME CONTAINER_PREFIX SEAFILE_SERVER_HOSTNAME SEAFILE_SERVER_PROTOCOL EXTERNAL_REVERSE_PROXY CADDY_HOST_PORT CADDY_CONTAINER_PORT CADDY_BIND_ADDRESS CADDY_SITE CADDY_TRUSTED_PROXIES TIME_ZONE INIT_SEAFILE_ADMIN_EMAIL INIT_SEAFILE_ADMIN_PASSWORD INIT_SEAFILE_MYSQL_ROOT_PASSWORD SEAFILE_MYSQL_DB_PASSWORD REDIS_PASSWORD JWT_PRIVATE_KEY ONLYOFFICE_JWT_SECRET IMAGE_PREFIX DOCKER_COMMAND DOCKER_COMPOSE_COMMAND DOCKER_SOCKET SEAFILE_IMAGE SEAFILE_DB_IMAGE SEAFILE_REDIS_IMAGE SEAFILE_CADDY_IMAGE SEADOC_IMAGE ONLYOFFICE_IMAGE MD_IMAGE NOTIFICATION_SERVER_IMAGE MD_FILE_COUNT_LIMIT SEASEARCH_IMAGE INIT_SS_ADMIN_USER INIT_SS_ADMIN_PASSWORD SEASEARCH_TOKEN; do
   printf '%s=%s\n' "$key" "${!key}" >> "$TARGET/.env.new"
 done
 ENV_INPUT="$TARGET/.env.new"
@@ -162,7 +181,7 @@ load_env() {
     [[ "$line" == *=* ]] || fail '配置必须为 KEY=value 格式'
     key="${line%%=*}"; val="${line#*=}"
     case "$key" in
-      DEPLOYMENT_KIND|COMPOSE_PROJECT_NAME|CONTAINER_PREFIX|SEAFILE_SERVER_HOSTNAME|SEAFILE_SERVER_PROTOCOL|EXTERNAL_REVERSE_PROXY|CADDY_HOST_PORT|CADDY_CONTAINER_PORT|CADDY_BIND_ADDRESS|CADDY_SITE|CADDY_TRUSTED_PROXIES|TIME_ZONE|INIT_SEAFILE_ADMIN_EMAIL|INIT_SEAFILE_ADMIN_PASSWORD|INIT_SEAFILE_MYSQL_ROOT_PASSWORD|SEAFILE_MYSQL_DB_PASSWORD|REDIS_PASSWORD|JWT_PRIVATE_KEY|ONLYOFFICE_JWT_SECRET|IMAGE_PREFIX|DOCKER_COMMAND|DOCKER_COMPOSE_COMMAND|DOCKER_SOCKET|SEAFILE_IMAGE|SEAFILE_DB_IMAGE|SEAFILE_REDIS_IMAGE|SEAFILE_CADDY_IMAGE|SEADOC_IMAGE|ONLYOFFICE_IMAGE|MD_IMAGE|NOTIFICATION_SERVER_IMAGE|THUMBNAIL_SERVER_IMAGE|MD_FILE_COUNT_LIMIT|THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT) ;;
+      DEPLOYMENT_KIND|COMPOSE_PROJECT_NAME|CONTAINER_PREFIX|SEAFILE_SERVER_HOSTNAME|SEAFILE_SERVER_PROTOCOL|EXTERNAL_REVERSE_PROXY|CADDY_HOST_PORT|CADDY_CONTAINER_PORT|CADDY_BIND_ADDRESS|CADDY_SITE|CADDY_TRUSTED_PROXIES|TIME_ZONE|INIT_SEAFILE_ADMIN_EMAIL|INIT_SEAFILE_ADMIN_PASSWORD|INIT_SEAFILE_MYSQL_ROOT_PASSWORD|SEAFILE_MYSQL_DB_PASSWORD|REDIS_PASSWORD|JWT_PRIVATE_KEY|ONLYOFFICE_JWT_SECRET|IMAGE_PREFIX|DOCKER_COMMAND|DOCKER_COMPOSE_COMMAND|DOCKER_SOCKET|SEAFILE_IMAGE|SEAFILE_DB_IMAGE|SEAFILE_REDIS_IMAGE|SEAFILE_CADDY_IMAGE|SEADOC_IMAGE|ONLYOFFICE_IMAGE|MD_IMAGE|NOTIFICATION_SERVER_IMAGE|MD_FILE_COUNT_LIMIT|SEASEARCH_IMAGE|INIT_SS_ADMIN_USER|INIT_SS_ADMIN_PASSWORD|SEASEARCH_TOKEN) ;;
       *) fail "未知配置键: $key" ;;
     esac
     [[ "$seen" != *" $key "* ]] || fail "重复配置键: $key"
@@ -171,13 +190,13 @@ load_env() {
     [[ "$val" =~ ^[A-Za-z0-9_./:@,+=\ -]*$ ]] || fail "配置 $key 含不支持字符；使用未加引号的纯文本值"
     export "$key=$val"
   done < "$file"
-  for key in DEPLOYMENT_KIND COMPOSE_PROJECT_NAME CONTAINER_PREFIX SEAFILE_SERVER_HOSTNAME SEAFILE_SERVER_PROTOCOL EXTERNAL_REVERSE_PROXY CADDY_HOST_PORT CADDY_CONTAINER_PORT CADDY_BIND_ADDRESS CADDY_SITE CADDY_TRUSTED_PROXIES TIME_ZONE INIT_SEAFILE_ADMIN_EMAIL INIT_SEAFILE_ADMIN_PASSWORD INIT_SEAFILE_MYSQL_ROOT_PASSWORD SEAFILE_MYSQL_DB_PASSWORD REDIS_PASSWORD JWT_PRIVATE_KEY ONLYOFFICE_JWT_SECRET IMAGE_PREFIX DOCKER_COMMAND DOCKER_COMPOSE_COMMAND DOCKER_SOCKET SEAFILE_IMAGE SEAFILE_DB_IMAGE SEAFILE_REDIS_IMAGE SEAFILE_CADDY_IMAGE SEADOC_IMAGE ONLYOFFICE_IMAGE MD_IMAGE NOTIFICATION_SERVER_IMAGE THUMBNAIL_SERVER_IMAGE MD_FILE_COUNT_LIMIT THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT; do
+  for key in DEPLOYMENT_KIND COMPOSE_PROJECT_NAME CONTAINER_PREFIX SEAFILE_SERVER_HOSTNAME SEAFILE_SERVER_PROTOCOL EXTERNAL_REVERSE_PROXY CADDY_HOST_PORT CADDY_CONTAINER_PORT CADDY_BIND_ADDRESS CADDY_SITE CADDY_TRUSTED_PROXIES TIME_ZONE INIT_SEAFILE_ADMIN_EMAIL INIT_SEAFILE_ADMIN_PASSWORD INIT_SEAFILE_MYSQL_ROOT_PASSWORD SEAFILE_MYSQL_DB_PASSWORD REDIS_PASSWORD JWT_PRIVATE_KEY ONLYOFFICE_JWT_SECRET IMAGE_PREFIX DOCKER_COMMAND DOCKER_COMPOSE_COMMAND DOCKER_SOCKET SEAFILE_IMAGE SEAFILE_DB_IMAGE SEAFILE_REDIS_IMAGE SEAFILE_CADDY_IMAGE SEADOC_IMAGE ONLYOFFICE_IMAGE MD_IMAGE NOTIFICATION_SERVER_IMAGE MD_FILE_COUNT_LIMIT SEASEARCH_IMAGE INIT_SS_ADMIN_USER INIT_SS_ADMIN_PASSWORD SEASEARCH_TOKEN; do
     [[ "$seen" == *" $key "* ]] || fail ".env 缺少 $key"
     [[ "$key" == IMAGE_PREFIX || -n "${!key}" ]] || fail ".env 中 $key 不能为空"
   done
-  [[ "$DEPLOYMENT_KIND" == seafile13-ce-v1 ]] || fail '不是本脚本的 CE 部署；禁止覆盖 Pro/未知数据'
+  [[ "$DEPLOYMENT_KIND" == seafile13-pro-v1 ]] || fail '不是本脚本的 Pro 部署；禁止覆盖 CE/未知数据'
   [[ "$COMPOSE_PROJECT_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ && "$CONTAINER_PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || fail '项目名或容器前缀格式错误'
-  [[ "$SEAFILE_IMAGE" != *seafile-pro* ]] || fail '社区版不接受 Pro 主镜像'
+  [[ "$SEAFILE_IMAGE" == *seafile-pro-mc* ]] || fail 'Pro 部署必须使用 seafile-pro-mc 镜像'
   [[ "$DOCKER_COMMAND" =~ ^[A-Za-z0-9_./-]+$ && "$DOCKER_COMPOSE_COMMAND" =~ ^[A-Za-z0-9_./\ -]+$ ]] || fail 'Docker 命令只能是可执行文件及普通参数'
   [[ "$DOCKER_SOCKET" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail 'DOCKER_SOCKET 必须是绝对路径'
   [[ "$CADDY_BIND_ADDRESS" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail '绑定地址必须是 IPv4'
@@ -187,9 +206,8 @@ load_env() {
   for key in CADDY_HOST_PORT CADDY_CONTAINER_PORT; do
     [[ "${!key}" =~ ^[1-9][0-9]{0,4}$ && "${!key}" -le 65535 ]] || fail "无效端口 $key"
   done
-  for key in MD_FILE_COUNT_LIMIT THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT; do
-    [[ "${!key}" =~ ^[1-9][0-9]*$ ]] || fail "无效正整数 $key"
-  done
+  [[ "$MD_FILE_COUNT_LIMIT" =~ ^[1-9][0-9]*$ ]] || fail "无效 MD_FILE_COUNT_LIMIT"
+  [[ "$(printf '%s' "$INIT_SS_ADMIN_USER:$INIT_SS_ADMIN_PASSWORD" | base64 | tr -d '\r\n')" == "$SEASEARCH_TOKEN" ]] || fail 'SeaSearch token 与账户密码不一致'
   [[ ${#JWT_PRIVATE_KEY} -ge 32 && ${#ONLYOFFICE_JWT_SECRET} -ge 32 ]] || fail 'JWT 密钥长度至少 32'
   [[ -z "$IMAGE_PREFIX" || "$IMAGE_PREFIX" =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*/$ ]] || fail '镜像代理格式为 registry[:port]/'
   local host="${SEAFILE_SERVER_HOSTNAME%%:*}" expected site
@@ -223,10 +241,13 @@ dc() { "${COMPOSE_CMD[@]}" --env-file .env -f docker-compose.yml -p "$COMPOSE_PR
 load_env "$ENV_INPUT"
 mv "$ENV_INPUT" "$TARGET/.env"
 chmod 600 "$TARGET/.env"
+# Generate and syntax-check the complete helper set before replacing managed files.
+STAGE="$(mktemp -d "$TARGET/.generated.XXXXXX")"
+TARGET="$STAGE"
 # Persist the same validated environment loader into runtime helpers.
 { printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'fail() { echo "错误: $*" >&2; exit 2; }'; sed -n '/^# COMMON_BEGIN/,/^# COMMON_END/p' "$0"; } > "$TARGET/common.sh"
 cat > "$TARGET/docker-compose.yml" <<'YAML'
-name: ${COMPOSE_PROJECT_NAME:-seafile13ce}
+name: ${COMPOSE_PROJECT_NAME:-seafile13pro}
 
 services:
   db:
@@ -276,8 +297,24 @@ services:
     networks:
       - seafile-net
 
+  seasearch:
+    image: ${IMAGE_PREFIX}${SEASEARCH_IMAGE}
+    container_name: ${CONTAINER_PREFIX}-seasearch
+    restart: unless-stopped
+    volumes:
+      - ./data/seasearch:/opt/seasearch/data
+    environment:
+      SS_FIRST_ADMIN_USER: ${INIT_SS_ADMIN_USER}
+      SS_FIRST_ADMIN_PASSWORD: ${INIT_SS_ADMIN_PASSWORD}
+      SS_MAX_OBJ_CACHE_SIZE: 2GB
+      SS_STORAGE_TYPE: disk
+      SS_LOG_TO_STDOUT: "true"
+      SS_LOG_LEVEL: info
+    networks:
+      - seafile-net
+
   seafile:
-    image: ${IMAGE_PREFIX}${SEAFILE_IMAGE:-seafileltd/seafile-mc:13.0-latest}
+    image: ${IMAGE_PREFIX}${SEAFILE_IMAGE:-seafileltd/seafile-pro-mc:13.0-latest}
     container_name: ${CONTAINER_PREFIX}-seafile
     restart: unless-stopped
     volumes:
@@ -302,6 +339,7 @@ services:
       ENABLE_SEADOC: "true"
       SEADOC_SERVER_URL: ${SEAFILE_SERVER_PROTOCOL}://${SEAFILE_SERVER_HOSTNAME}/sdoc-server
       ONLYOFFICE_JWT_SECRET: ${ONLYOFFICE_JWT_SECRET}
+      SEASEARCH_TOKEN: ${SEASEARCH_TOKEN}
       CACHE_PROVIDER: redis
       REDIS_HOST: redis
       REDIS_PORT: "6379"
@@ -314,9 +352,6 @@ services:
     labels:
       caddy: "${CADDY_SITE}"
       caddy.reverse_proxy: "{{upstreams 80}}"
-      caddy.6_handle: "/seafdav*"
-      caddy.6_handle.0_reverse_proxy: "{{upstreams 8080}}"
-      caddy.6_handle.0_reverse_proxy.header_up: "X-Forwarded-Proto ${SEAFILE_SERVER_PROTOCOL}"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:80 || exit 1"]
       interval: 30s
@@ -400,7 +435,7 @@ services:
       # HTTPS_CHALLENGE_PORT
     environment:
       CADDY_DOCKER_LABEL_PREFIX: seafile-${COMPOSE_PROJECT_NAME}
-      CADDY_INGRESS_NETWORKS: ${COMPOSE_PROJECT_NAME:-seafile13ce}_seafile-net
+      CADDY_INGRESS_NETWORKS: ${COMPOSE_PROJECT_NAME:-seafile13pro}_seafile-net
     labels:
       caddy: ""
       caddy.servers.trusted_proxies: "static ${CADDY_TRUSTED_PROXIES:-127.0.0.1/32}"
@@ -477,43 +512,10 @@ services:
     networks:
       - seafile-net
 
-  thumbnail-server:
-    image: ${IMAGE_PREFIX}${THUMBNAIL_SERVER_IMAGE}
-    container_name: ${CONTAINER_PREFIX}-thumbnail-server
-    restart: unless-stopped
-    volumes:
-      - ./data/seafile:/shared
-    environment:
-      TIME_ZONE: ${TIME_ZONE}
-      SEAFILE_MYSQL_DB_HOST: db
-      SEAFILE_MYSQL_DB_PORT: "3306"
-      SEAFILE_MYSQL_DB_USER: seafile
-      SEAFILE_MYSQL_DB_PASSWORD: ${SEAFILE_MYSQL_DB_PASSWORD}
-      SEAFILE_MYSQL_DB_CCNET_DB_NAME: ccnet_db
-      SEAFILE_MYSQL_DB_SEAFILE_DB_NAME: seafile_db
-      JWT_PRIVATE_KEY: ${JWT_PRIVATE_KEY}
-      INNER_SEAHUB_SERVICE_URL: http://seafile
-      THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT: ${THUMBNAIL_IMAGE_ORIGINAL_SIZE_LIMIT}
-      SEAF_SERVER_STORAGE_TYPE: disk
-      NON_ROOT: "false"
-    labels:
-      caddy: "${CADDY_SITE}"
-      caddy.4_handle: "/thumbnail/*"
-      caddy.4_handle.0_reverse_proxy: "{{upstreams 80}}"
-      caddy.5_handle_path: "/thumbnail/ping"
-      caddy.5_handle_path.0_rewrite: "/ping"
-      caddy.5_handle_path.1_reverse_proxy: "{{upstreams 80}}"
-    depends_on:
-      db:
-        condition: service_healthy
-      seafile:
-        condition: service_healthy
-    networks:
-      - seafile-net
 
 networks:
   seafile-net:
-    name: ${COMPOSE_PROJECT_NAME:-seafile13ce}_seafile-net
+    name: ${COMPOSE_PROJECT_NAME:-seafile13pro}_seafile-net
 
 YAML
 # Docker label keys do not support Compose interpolation. Render a project-specific
@@ -527,7 +529,7 @@ if [[ "$EXTERNAL_REVERSE_PROXY" == 0 && "$SEAFILE_SERVER_PROTOCOL" == https ]]; 
   mv "$TARGET/docker-compose.yml.new" "$TARGET/docker-compose.yml"
 fi
 cat > "$TARGET/configure.py" <<'PY'
-"""Idempotent managed settings. Run inside the initialized CE container."""
+"""Idempotent managed settings. Run inside the initialized Pro container."""
 import ast
 import configparser
 import io
@@ -560,9 +562,24 @@ def save(path, content):
         if os.path.exists(tmp):
             os.unlink(tmp)
 
+path = conf / 'seafevents.conf'
+cfg = configparser.ConfigParser(interpolation=None, strict=False)
+cfg.read_string(path.read_text())
+for section, values in {
+    'INDEX FILES': {'enabled': 'false'},
+    'SEASEARCH': {'enabled': 'true', 'seasearch_url': 'http://seasearch:4080',
+                  'seasearch_token': os.environ['SEASEARCH_TOKEN'], 'interval': '1m',
+                  'index_office_pdf': 'true'},
+}.items():
+    if not cfg.has_section(section): cfg.add_section(section)
+    for key, value in values.items(): cfg.set(section, key, value)
+buf = io.StringIO(); cfg.write(buf)
+# Check strict parsing before replacing a potentially damaged old file.
+configparser.ConfigParser(interpolation=None).read_string(buf.getvalue())
+save(path, buf.getvalue())
 path = conf / 'seahub_settings.py'
 text = path.read_text()
-text = re.sub(r'\n# BEGIN SEAFILE13_CE MANAGED\n.*?# END SEAFILE13_CE MANAGED\n?', '\n', text, flags=re.S)
+text = re.sub(r'\n# BEGIN SEAFILE13_PRO MANAGED\n.*?# END SEAFILE13_PRO MANAGED\n?', '\n', text, flags=re.S)
 settings = {
     'SERVICE_URL': url,
     'FILE_SERVER_ROOT': url + '/seafhttp',
@@ -577,23 +594,11 @@ settings = {
     'ONLYOFFICE_EDIT_FILE_EXTENSION': ('docx', 'pptx', 'xlsx', 'csv'),
     'ENABLE_METADATA_MANAGEMENT': True,
     'METADATA_SERVER_URL': 'http://seafile-md-server:8084',
-    'ENABLE_VIDEO_THUMBNAIL': True,
 }
-text = text.rstrip() + '\n\n# BEGIN SEAFILE13_CE MANAGED\n' + ''.join(f'{k} = {v!r}\n' for k, v in settings.items()) + '# END SEAFILE13_CE MANAGED\n'
+text = text.rstrip() + '\n\n# BEGIN SEAFILE13_PRO MANAGED\n' + ''.join(f'{k} = {v!r}\n' for k, v in settings.items()) + '# END SEAFILE13_PRO MANAGED\n'
 ast.parse(text)
 save(path, text)
-path = conf / 'seafdav.conf'
-cfg = configparser.ConfigParser(interpolation=None)
-if path.exists():
-    cfg.read_string(path.read_text())
-if not cfg.has_section('WEBDAV'):
-    cfg.add_section('WEBDAV')
-for k, v in {'enabled': 'true', 'port': '8080', 'host': '0.0.0.0', 'debug': 'false', 'share_name': '/seafdav', 'workers': '5', 'timeout': '1200'}.items():
-    cfg.set('WEBDAV', k, v)
-buf = io.StringIO()
-cfg.write(buf)
-save(path, buf.getvalue())
-print('CE 配置完成：SeaDoc / Wiki / Office / Metadata / 视频缩略图 / WebDAV。')
+print('Pro 配置完成：SeaDoc / Wiki / Office / Metadata / SeaSearch。')
 PY
 cat > "$TARGET/compose.sh" <<'SH_HELPER'
 #!/usr/bin/env bash
@@ -654,7 +659,7 @@ mkdir -p ./data/onlyoffice
     fi
   '
 # DB account/schema and shared configuration must exist before extension startup.
-dc up -d --wait --wait-timeout "$WAIT" db redis seafile
+dc up -d --wait --wait-timeout "$WAIT" db redis seasearch seafile
 dc exec -T seafile python3 - < configure.py
 dc restart seafile
 dc up -d --wait --wait-timeout "$WAIT"
@@ -668,20 +673,19 @@ cd "$(dirname "$0")"
 source ./common.sh
 load_env .env
 dc exec -T -e VERIFY_USERNAME -e VERIFY_PASSWORD -e VERIFY_TOKEN -e VERIFY_TIMEOUT \
-  -e VERIFY_WEBDAV_USERNAME -e VERIFY_WEBDAV_PASSWORD seafile python3 - < verify.py
+  seafile python3 - < verify.py
 PUBLIC_URL="$SEAFILE_SERVER_PROTOCOL://$SEAFILE_SERVER_HOSTNAME"
 [[ "$(curl --noproxy '*' --fail --silent --show-error --max-time 20 "$PUBLIC_URL/api2/ping/")" == *pong* ]] || fail '宿主机主地址验收失败'
 echo 'PASS 宿主机主地址访问'
 SH_HELPER
 cat > "$TARGET/verify.py" <<'PY'
 """Public-route smoke tests. Delete only resources created by this invocation."""
-import io
 import json
 import os
 import sys
 import time
 import uuid
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
 import requests
 
 base = os.environ['SEAFILE_SERVER_PROTOCOL'] + '://' + os.environ['SEAFILE_SERVER_HOSTNAME']
@@ -730,7 +734,6 @@ try:
     wait('ONLYOFFICE 健康', lambda: check_text('/onlyofficeds/healthcheck', 'true'))
     wait('ONLYOFFICE 编辑器脚本', lambda: check_text('/onlyofficeds/web-apps/apps/api/documents/api.js', 'DocsAPI'))
     wait('Notification 主地址', lambda: check_text('/notification/ping', 'pong'))
-    wait('Thumbnail 主地址', lambda: check_text('/thumbnail/ping', 'pong'))
     username = os.getenv('VERIFY_USERNAME') or os.environ['INIT_SEAFILE_ADMIN_EMAIL']
     password = os.getenv('VERIFY_PASSWORD') or os.environ['INIT_SEAFILE_ADMIN_PASSWORD']
     token = os.getenv('VERIFY_TOKEN') or request('POST', '/api2/auth-token/', data={'username': username, 'password': password}).json()['token']
@@ -739,7 +742,8 @@ try:
     print('PASS 用户登录', flush=True)
     name = 'deploy-check-' + uuid.uuid4().hex
     repo = request('POST', '/api2/repos/', data={'name': name, 'desc': 'Temporary deployment verification'}).json()['repo_id']
-    payload = ('seafile CE deployment verification ' + name).encode()
+    search_marker = 'seafilecontent' + uuid.uuid4().hex
+    payload = ('seafile Pro deployment verification ' + search_marker).encode()
     upload = request('GET', f'/api2/repos/{repo}/upload-link/').json()
     request('POST', upload, data={'parent_dir': '/'}, files={'file': ('check.txt', payload, 'text/plain')})
     download = request('GET', f'/api2/repos/{repo}/file/', params={'p': '/check.txt'}).json()
@@ -747,52 +751,13 @@ try:
         raise CheckError('上传下载内容不一致')
     print('PASS 资料库创建、上传、下载内容校验', flush=True)
 
-    # API token is not a WebDAV password. A separate app password may be supplied.
-    dav = requests.Session()
-    dav.trust_env = False
-    dav.auth = (os.getenv('VERIFY_WEBDAV_USERNAME') or username, os.getenv('VERIFY_WEBDAV_PASSWORD') or password)
-    davroot = base + '/seafdav/'
-    def dav_request(method, path, expected, **kwargs):
-        r = dav.request(method, davroot + path, timeout=30, allow_redirects=False, **kwargs)
-        if r.status_code not in expected:
-            raise CheckError(f'WebDAV {method}: HTTP {r.status_code}')
-        return r
-    def dav_list():
-        dav_request('PROPFIND', '', (207,), headers={'Depth': '1'})
-        if dav_request('GET', quote(name) + '/check.txt', (200,)).content != payload:
-            raise CheckError('WebDAV 读取内容不一致')
-    wait('WebDAV 认证、PROPFIND、读取', dav_list)
-    dav_path = quote(name) + '/dav-check.txt'
-    dav_new = quote(name) + '/dav-moved.txt'
-    dav_request('PUT', dav_path, (201, 204), data=payload)
-    dav_request('MOVE', dav_path, (201, 204), headers={'Destination': davroot + dav_new, 'Overwrite': 'F'})
-    if dav_request('GET', dav_new, (200,)).content != payload:
-        raise CheckError('WebDAV 移动后内容不一致')
-    dav_request('DELETE', dav_new, (200, 204))
-    print('PASS WebDAV 写入、重命名、内容校验、删除', flush=True)
-
-    # Use real PNG data and route through the independent thumbnail server.
-    from PIL import Image
-    buf = io.BytesIO()
-    Image.new('RGB', (640, 480), (40, 120, 200)).save(buf, format='PNG')
-    request('POST', upload, data={'parent_dir': '/'}, files={'file': ('check.png', buf.getvalue(), 'image/png')})
-    def thumbnail():
-        r = request('GET', f'/thumbnail/{repo}/256/check.png')
-        if not r.headers.get('Content-Type', '').startswith('image/'):
-            raise CheckError('缩略图未返回图像')
-        im = Image.open(io.BytesIO(r.content))
-        im.load()
-        if max(im.size) > 256 or min(im.size) == 0:
-            raise CheckError('缩略图尺寸异常')
-    wait('实际图片缩略图生成', thumbnail)
-
     meta = f'/api/v2.1/repos/{repo}/metadata/'
     request('PUT', meta, json={'enabled': True})
     views = request('GET', meta + 'views/').json()['views']
     view_id = views[0]['_id']
     def metadata():
         r = request('GET', meta + 'records/', params={'view_id': view_id}).json()
-        if 'check.png' not in json.dumps(r):
+        if 'check.txt' not in json.dumps(r):
             raise CheckError('元数据还未索引测试文件')
     wait('Metadata 文件记录初始化', metadata)
     request('POST', upload, data={'parent_dir': '/'}, files={'file': ('metadata-new.txt', payload, 'text/plain')})
@@ -801,6 +766,13 @@ try:
         if 'metadata-new.txt' not in json.dumps(r):
             raise CheckError('元数据还未更新')
     wait('Metadata 增量更新', metadata_update)
+
+    # The marker exists only in file contents, never in filename/library name.
+    def search_content():
+        result = request('GET', '/api2/search/', params={'q': search_marker, 'search_repo': repo, 'search_filename_only': 'false'}).json()
+        if 'check.txt' not in json.dumps(result):
+            raise CheckError('SeaSearch 尚未索引测试文件正文')
+    wait('SeaSearch 实际正文索引结果', search_content)
 
     info = request('POST', '/api/v2.1/wikis2/', json={'name': 'deploy-wiki-' + uuid.uuid4().hex}).json()
     wiki = info.get('id') or info.get('wiki_id') or info.get('repo_id')
@@ -830,24 +802,31 @@ if failed:
     sys.exit(1)
 PY
 cat > "$TARGET/README.txt" <<EOF
-Seafile 13 CE 部署（不含全文搜索）
+Seafile 13 Pro 部署（含 SeaSearch 全文搜索）
 主地址: $SEAFILE_SERVER_PROTOCOL://$SEAFILE_SERVER_HOSTNAME
-WebDAV: $SEAFILE_SERVER_PROTOCOL://$SEAFILE_SERVER_HOSTNAME/seafdav/
 账号及随机初始密码: .env 的 INIT_SEAFILE_ADMIN_EMAIL / INIT_SEAFILE_ADMIN_PASSWORD
 ./deploy.sh 执行初始化；./verify.sh 业务验收；./compose.sh ps / logs 查看状态。
 PULL=1 ./deploy.sh 才主动刷新已有镜像；缺少镜像时 Compose 自动拉取。
 本脚本只初始化空目录，不包含旧版本识别、迁移或升级逻辑。
-请勿修改项目名/容器前缀后直接复用运行中的目录；不要将 Pro 数据直接降级到 CE。
+请勿修改项目名/容器前缀后直接复用运行中的目录；不要将 CE 数据直接混用到本目录。
 全部持久化数据位于本目录 data/；不使用项目命名卷。
 浏览器与容器必须能访问主地址；内网 IP 次要入口不承诺完整协同/Office/登录行为。
 外部反代必须转发 Host、X-Forwarded-Proto 及 WebSocket，配置实际代理来源到可信代理列表。
 验收会创建并删除测试资料库和 Wiki，回收站可能保留测试记录。
 改过管理员密码后用 VERIFY_USERNAME/VERIFY_PASSWORD 或 VERIFY_TOKEN；
-WebDAV 另可指定 VERIFY_WEBDAV_USERNAME/VERIFY_WEBDAV_PASSWORD（应用密码）。
 详细说明、测试边界与反代示例见仓库 README.md / docs/。
 EOF
 chmod 700 "$TARGET/compose.sh" "$TARGET/deploy.sh" "$TARGET/verify.sh"
-echo "已生成 CE 部署文件: ${TARGET}；凭据见 .env（请勿提交 Git）。"
+for file in common.sh compose.sh deploy.sh verify.sh; do
+  bash -n "$TARGET/$file"
+done
+for file in docker-compose.yml common.sh configure.py verify.py verify.sh deploy.sh compose.sh README.txt; do
+  mv "$TARGET/$file" "$DEPLOY_TARGET/$file"
+done
+rmdir "$STAGE"
+STAGE=''
+TARGET="$DEPLOY_TARGET"
+echo "已生成 Pro 部署文件: ${TARGET}；凭据见 .env（请勿提交 Git）。"
 # Release generator lock before the generated deployer acquires it.
 rmdir "$TARGET/.operation-lock"
 trap - EXIT

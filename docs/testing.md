@@ -2,78 +2,56 @@
 
 ## 离线回归
 
-执行：
-
 ```bash
-./tests/run.sh
+bash tests/run.sh
 ```
 
-当前 12 项回归测试覆盖：
+22 项回归覆盖 CE/Pro 的服务与反代配置、所有持久化挂载位于部署目录、已有部署拒绝覆盖、随机凭据与环境变量隔离、非法配置拒绝、并发锁、配置文件生成与幂等写入。还执行 Bash/Python 语法检查及 ShellCheck（已安装时）。Compose 渲染需要 Docker CLI，不需要启动服务；缺少 CLI 的项目会明确跳过。
 
-1. 全套 9 个容器、WebDAV/缩略图路由、数据库及缓存连接、仅暴露 Caddy 端口。
-2. 配置托管块幂等，保留自定义配置及配置备份。
-3. 重跑保留 `.env`、凭据及数据，不接受环境变量偷偷覆盖。
-4. 宿主环境中的数据库、Redis、Metadata 端口、SeaDoc 路径不能改变内部拓扑。
-5. 外部反代与多站点格式。
-6. HTTPS 80/443、镜像代理、第二实例容器和 Caddy 标签隔离。
-7. 非法端口、协议、命令、主机、前缀和模式拒绝执行。
-8. 数据存在但 `.env` 丢失时拒绝生成新凭据。
-9. 并发操作锁。
-10. 恶意 `.env` 命令替换不执行。
-11. Pro/未知部署目录拒绝覆盖。
-12. 缺少键、重复键拒绝执行。
-
-还检查主脚本及生成脚本的 Bash 语法、生成 Python 的语法；安装 ShellCheck 时执行静态检查。Compose 渲染通过 Docker CLI 完成，无需启动 daemon。缺少 Docker CLI 时相关用例明确标为 skipped，不能当作已经验证渲染。
-
-## 真实隔离集成测试
+## 真实首次部署测试
 
 ```bash
-TEST_HOSTNAME=192.168.1.100 TEST_PORT=28913 ./tests/integration.sh
+TEST_EDITION=ce TEST_HOSTNAME=192.168.1.100 TEST_PORT=28913 bash tests/integration.sh
+TEST_EDITION=pro TEST_HOSTNAME=192.168.1.100 TEST_PORT=28914 bash tests/integration.sh
 ```
 
-将主机地址替换成测试机器真实 LAN IPv4 或可解析域名。脚本创建唯一项目和目录，执行两轮完整部署/验收，结束时移除本次容器及网络；保留被 Git 忽略的测试数据、配置和命名卷用于排查。不会清理其他 Docker 资源，不执行全局 prune。
+测试创建唯一目录和独立 Compose 项目，执行首次初始化和自动验收，结束后移除本次容器及网络。数据和凭据留在被 Git 忽略的 `deployments/` 下，不清理其他 Docker 资源。
 
-不要用 localhost/127.0.0.1：容器中的回环地址不是宿主机。`host.docker.internal` 在容器中通常可用，但宿主操作系统不一定能解析；双端验收会检测这一点。
+宿主机和所有容器均须能访问 `TEST_HOSTNAME`。不要使用容器回环地址 `localhost/127.0.0.1`。
 
-每次 `verify.sh` 自动检查：
+OrbStack 的 macOS 共享目录不能保留 Office PostgreSQL 要求的属主，因此最终全目录挂载方案不能在该共享目录部署。可使用以下测试入口，在 Docker 主机的 Linux `/var/lib/seafile13-linux-test-*` 目录运行同一脚本：
 
-- 从容器访问公开 Seafile API。
-- SeaDoc 公开入口及 Socket.IO 握手。
-- ONLYOFFICE 健康和编辑器 JS。
-- Notification 与 Thumbnail 的公开 ping。
-- API 登录、创建资料库、上传文件、下载并比对内容。
-- WebDAV Basic/应用密码认证、PROPFIND、读取、PUT、MOVE、移动后读取比对、DELETE。
-- 上传 640×480 PNG，经过独立缩略图服务生成并读取最大边 256 的真实图片。
-- 启用元数据、初始化记录、新增文件后等待元数据增量更新。
-- 创建 Wiki、创建页面、验证 SeaDoc 访问令牌。
-- 清理本次创建的 Wiki/资料库；失败时也清理并报告残留对象 ID。
-- 从宿主机访问同一主地址。
+```bash
+TEST_EDITION=ce TEST_HOSTNAME=192.168.1.100 bash tests/linux-filesystem.sh
+TEST_EDITION=pro TEST_HOSTNAME=192.168.1.100 bash tests/linux-filesystem.sh
+```
 
-## 本次验证记录（2026-09-22）
+该入口临时使用 `docker:27-cli` 并安装测试依赖，通过 Docker socket 调用现有 daemon，打印 Linux 测试数据目录；测试容器自动清理，数据留作排查。它只是测试工具，正常部署只需要对应版本的一个初始化脚本。macOS 仓库内保存测试源码，可将日志重定向到忽略目录 `test-results/`。
 
-环境：macOS + OrbStack Linux ARM64，Docker Compose v5.1.2，独立项目 `seafile13ce-test`。
+## 自动业务验收
 
-已通过 12 项回归、ShellCheck、Bash/Python 语法和 Compose 渲染。真实 HTTP 部署全部自动业务检查通过，包含多次重跑和主地址修改后重新生成配置。
+两个版本共同检查：
 
-另外使用独立 Nginx 容器在 28914 端口终止 TLS，再转发到内层 Caddy HTTP，完整自动验收也全部通过，包含 WebDAV PUT/MOVE/GET/DELETE、实际图片缩略图、Metadata 增量更新和 Wiki。测试使用一天有效期的自签名测试证书，显式加入测试容器的 requests CA bundle，宿主 curl 使用该证书作为 CA；没有关闭 TLS 校验，也没有修改系统级证书信任。测试不覆盖真实公网证书签发、实际 VPS/FRP 链路或浏览器 Office 保存回调。
+- 容器端和执行脚本的一端访问公开 Seafile API。
+- API 登录、创建临时资料库、上传、下载及内容比对。
+- SeaDoc 公开路由和 Socket.IO 握手、Wiki/页面创建及 SeaDoc 令牌。
+- ONLYOFFICE 公开健康接口及编辑器 JavaScript。
+- Notification 的公开 ping。
+- Metadata 初始化及新增文件后的增量更新。
+- 最后删除本次资料库和 Wiki；失败也尝试清理，未成功时报告对象 ID。
 
-主镜像实际版本为 **Seafile CE 13.0.28**；记录本机镜像 ID（不是可用于拉取的 registry digest）：
+CE 另检查 WebDAV 认证、PROPFIND、GET、PUT、MOVE、DELETE，以及上传真实 PNG 后读取独立服务生成的缩略图。
 
-- Seafile CE：`sha256:b0c90832126bf432db908449f1bb450211e6bbf75a2193bab3399e2a9636eccf`，arm64。
-- ONLYOFFICE 8.1.0.1：`sha256:423328ee377374c48a30c2aa416e4afedf621faff068f97966cb9b87a28550bd`，arm64。
+Pro 另上传含随机正文标记的文件，调用全文检索 API 并确认返回该文件，避免只验证文件名搜索。
 
-`13.0-latest` 等通道以后可能指向新镜像；此记录只覆盖本次测试镜像，不代表未来更新已验证。生产固定镜像应使用 registry RepoDigest，不能把上面的本机 image ID 当成 registry digest。
+## 验证记录与边界
 
-## 仍需在目标环境验收
+2026-09-23，macOS + OrbStack Linux ARM64：22 项回归、ShellCheck 与语法检查通过。CE 13.0.28、Pro 13.0.28 和 ONLYOFFICE 8.1.0.1 在 Docker 主机 Linux 文件系统上的空目录部署，两个版本上述自动业务检查均通过，包括 CE WebDAV/实际缩略图和 Pro 正文全文检索。运行中的挂载检查确认持久化数据使用部署目录下的 bind mount，没有匿名数据卷；Docker socket 是唯一的外部挂载。
 
-这些不是自动脚本已经证明的能力：
+macOS 共享目录测试明确复现 PostgreSQL 属主不兼容；初始化已加入提前报错。测试入口与完整日志保存在项目中，日志位于 Git 忽略的 `test-results/`。
 
-1. 浏览器打开 Wiki/SeaDoc，输入内容，刷新确认保存；两个不同用户同时编辑，确认协作与权限。
-2. 上传实际 DOCX/XLSX/PPTX，编辑、关闭并重新打开，确认文件保存回调和版本变化。
-3. 两个浏览器同时打开同一资料库，另一个新增/删除文件，确认通知自动更新；客户端同步及 SeaDrive 单独验证。
-4. 上传目标相机/手机的视频、PDF及高分辨率图片，检查缩略图；本次自动图像测试使用 PNG，不覆盖所有编码格式。
-5. 分享权限、加密资料库、目标 WebDAV 客户端、双因素认证/应用密码等按实际使用场景测试。
-6. 公网 DNS、正式证书签发续期、实际 FRP/OpenResty 网络路径与代理来源 IP。
-7. 备份恢复、大文件、大资料库及并发压力。
+早期 CE 反代方案已通过独立 Nginx HTTPS 终止后的 API/WebDAV MOVE/缩略图/Metadata/Wiki 验收；该次使用项目命名卷存储 Office PostgreSQL，不能代替最终全目录挂载方案的验收。
 
-WebDAV 适合兼容访问；大量小文件的高频操作优先用同步客户端。预设图像大小限制为 256 MB；Thumbnail 对 PDF 等类型还有上游自身的限制，不能把图片成功等同于所有文件都可生成缩略图。
+仍需在目标环境人工测试浏览器内的 Office 编辑保存回调、SeaDoc 多人协作和刷新持久化、实时通知更新、客户端同步。自动缩略图用例使用 PNG，不覆盖全部视频/PDF 格式；公网证书签发、实际 FRP/VPS 链路、大文件压力与备份恢复也不在自动验收范围内。
+
+默认版本通道未来可能变化，测试结果不代表未来镜像已经验证。

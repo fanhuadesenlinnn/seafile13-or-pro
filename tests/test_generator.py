@@ -35,6 +35,11 @@ class GeneratorTests(unittest.TestCase):
         data.update(changes)
         (self.target / '.env').write_text(''.join(f'{k}={v}\n' for k, v in data.items()))
 
+    def reject_saved_env(self):
+        r = subprocess.run(['bash', str(self.target / 'compose.sh'), 'config'], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        return r
+
     def compose(self):
         if not shutil.which('docker'):
             self.skipTest('Docker CLI required for Compose rendering (no daemon needed)')
@@ -48,6 +53,13 @@ class GeneratorTests(unittest.TestCase):
         services = data['services']
         self.assertEqual(set(services), {'db', 'redis', 'seafile', 'caddy', 'onlyoffice', 'seadoc', 'seafile-md-server', 'notification-server', 'thumbnail-server'})
         self.assertNotIn('seasearch', json.dumps(data).lower())
+        self.assertFalse(data.get('volumes'))
+        for service in services.values():
+            for mount in service.get('volumes', []):
+                self.assertEqual(mount['type'], 'bind')
+                if mount['target'] != '/var/run/docker.sock':
+                    self.assertTrue(mount['source'].startswith(str(self.target / 'data') + '/'))
+        self.assertIn('/var/lib/postgresql', {v['target'] for v in services['onlyoffice']['volumes']})
         self.assertIn('seafile-mc:', services['seafile']['image'])
         self.assertEqual(services['seafile']['labels']['seafile-seafile13ce.6_handle.0_reverse_proxy'], '{{upstreams 8080}}')
         self.assertEqual(services['thumbnail-server']['labels']['seafile-seafile13ce.4_handle'], '/thumbnail/*')
@@ -62,16 +74,16 @@ class GeneratorTests(unittest.TestCase):
         for path in self.target.glob('*.py'):
             ast.parse(path.read_text())
 
-    def test_rerun_preserves_env_data_and_ignores_ambient(self):
+    def test_existing_deployment_refused_without_changes(self):
         self.generate()
         before = (self.target / '.env').read_bytes()
         (self.target / 'data').mkdir()
         sentinel = self.target / 'data' / 'keep.txt'
         sentinel.write_text('untouched')
-        self.generate(SEAFILE_SERVER_HOSTNAME='evil.example.test', CADDY_HOST_PORT='2222', INIT_SEAFILE_ADMIN_PASSWORD='changed', IMAGE_PREFIX='changed.example')
+        self.generate(good=False, SEAFILE_SERVER_HOSTNAME='evil.example.test', CADDY_HOST_PORT='2222', INIT_SEAFILE_ADMIN_PASSWORD='changed', IMAGE_PREFIX='changed.example')
         self.assertEqual(before, (self.target / '.env').read_bytes())
         self.assertEqual(sentinel.read_text(), 'untouched')
-        self.assertTrue(list((self.target / 'config-backups').glob('*/.env')))
+        self.assertFalse((self.target / 'config-backups').exists())
 
     def test_ambient_settings_cannot_redirect_internal_services(self):
         self.generate()
@@ -111,6 +123,25 @@ class GeneratorTests(unittest.TestCase):
         self.generate(good=False)
         self.assertFalse((self.target / '.env').exists())
 
+    def test_deployer_refuses_existing_data_before_docker(self):
+        self.generate()
+        (self.target / 'data').mkdir()
+        r = subprocess.run(['bash', str(self.target / 'deploy.sh')], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('仅支持首次初始化', r.stderr)
+        self.assertFalse((self.target / '.operation-lock').exists())
+
+    def test_nonempty_directory_and_broken_symlink_refused(self):
+        self.target.mkdir()
+        keep = self.target / 'common.sh'
+        keep.write_text('user content')
+        self.generate(good=False)
+        self.assertEqual(keep.read_text(), 'user content')
+        keep.unlink()
+        (self.target / '.env').symlink_to(self.target / 'missing')
+        self.generate(good=False)
+        self.assertTrue((self.target / '.env').is_symlink())
+
     def test_lock_refuses_concurrent_operation(self):
         (self.target / '.operation-lock').mkdir(parents=True)
         self.generate(good=False)
@@ -119,22 +150,22 @@ class GeneratorTests(unittest.TestCase):
         self.generate()
         marker = Path(self.tmp.name) / 'should-not-exist'
         self.edit(TIME_ZONE=f'$(touch {marker})')
-        self.generate(good=False)
+        self.reject_saved_env()
         self.assertFalse(marker.exists())
 
     def test_pro_directory_is_rejected(self):
         self.generate()
         self.edit(DEPLOYMENT_KIND='seafile-pro', SEAFILE_IMAGE='seafileltd/seafile-pro-mc:13.0-latest')
-        self.generate(good=False)
+        self.reject_saved_env()
 
     def test_missing_and_duplicate_keys_rejected(self):
         self.generate()
         env = self.target / '.env'
         original = env.read_text()
         env.write_text(original + 'TIME_ZONE=UTC\n')
-        self.generate(good=False)
+        self.reject_saved_env()
         env.write_text('\n'.join(l for l in original.splitlines() if not l.startswith('REDIS_PASSWORD=')) + '\n')
-        self.generate(good=False)
+        self.reject_saved_env()
 
     def test_configuration_is_idempotent_and_preserves_custom_settings(self):
         self.generate()
