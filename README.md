@@ -3,7 +3,7 @@
 选一个版本，只复制对应的 **一个脚本** 到服务器即可。脚本自动生成配置、启动全部服务并执行业务验收，不需要另外下载模板，也不依赖宿主机 Python。
 
 - 社区版：`init-seafile13ce.sh`，不包含全文检索，增加独立缩略图服务和 WebDAV。
-- 专业版：`init-seafile13pro-fixed-v2.sh`，保留原脚本的 SeaSearch 全文检索和其他服务；授权条件遵循 Seafile Pro。
+- 专业版：`init-seafile13pro-fixed-v2.sh`，包含 SeaSearch 全文检索和 WebDAV；授权条件遵循 Seafile Pro。
 
 两个脚本都只负责**首次部署**，不提供迁移、接管旧实例或升级流程；生成的 `deploy.sh` 也拒绝复用已有数据。部署目录非空时拒绝覆盖。所有服务的持久化数据均在指定部署目录的 `data/` 下，没有需要另行寻找的 Docker 数据卷。
 
@@ -17,11 +17,11 @@
 | ONLYOFFICE 预览编辑、JWT、同域反代 | ✓ | ✓ |
 | Metadata 扩展属性、Notification 通知 | ✓ | ✓ |
 | 独立 Thumbnail 服务、视频缩略图配置 | ✓ | 未添加 |
-| WebDAV 读写与重命名 | ✓ | 未添加 |
+| WebDAV 读写与重命名 | ✓ | ✓ |
 | SeaSearch 全文检索 | 不包含 | ✓ |
 | Caddy HTTP/HTTPS、外部反代、镜像代理、多实例隔离 | ✓ | ✓ |
 
-“未添加”表示该 Pro 脚本保持原有功能范围，不表示产品不支持。服务启动及 API 验收不等于所有浏览器交互均已测试，详见 [测试说明](docs/testing.md)。
+“未添加”表示脚本没有配置该功能，不表示产品不支持。服务启动及 API 验收不等于所有浏览器交互均已测试，详见 [测试说明](docs/testing.md)。
 
 ## 使用
 
@@ -59,6 +59,8 @@ bash init-seafile13ce.sh ./deployments/seafile13-ce
 ```
 
 可信代理填写 Caddy 实际看到的来源 IP/CIDR。外层需要保留 Host、传递协议并支持 WebSocket；脚本不会配置 VPS、FRP 或外层证书。Office 反代明确传递最终访问协议，并交由 Caddy 处理来源地址链。详见 [反向代理说明](docs/reverse-proxy.md)。
+
+两个版本都会启用 `/seafdav/`。如需同时用公网域名和局域网 IP，可在 `CADDY_SITE` 中列出两个 HTTP 内层站点；WebDAV 路由对两者生效。局域网 HTTP 会明文传输登录凭据，实际使用优先选择 HTTPS 地址。
 
 ## 其他常用配置
 

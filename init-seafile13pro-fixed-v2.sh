@@ -352,6 +352,9 @@ services:
     labels:
       caddy: "${CADDY_SITE}"
       caddy.reverse_proxy: "{{upstreams 80}}"
+      caddy.4_handle: "/seafdav/*"
+      caddy.4_handle.0_reverse_proxy: "{{upstreams 8080}}"
+      caddy.4_handle.0_reverse_proxy.header_up: "X-Forwarded-Proto ${SEAFILE_SERVER_PROTOCOL}"
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:80 || exit 1"]
       interval: 30s
@@ -598,7 +601,19 @@ settings = {
 text = text.rstrip() + '\n\n# BEGIN SEAFILE13_PRO MANAGED\n' + ''.join(f'{k} = {v!r}\n' for k, v in settings.items()) + '# END SEAFILE13_PRO MANAGED\n'
 ast.parse(text)
 save(path, text)
-print('Pro 配置完成：SeaDoc / Wiki / Office / Metadata / SeaSearch。')
+path = conf / 'seafdav.conf'
+cfg = configparser.ConfigParser(interpolation=None)
+if path.exists():
+    cfg.read_string(path.read_text())
+if not cfg.has_section('WEBDAV'):
+    cfg.add_section('WEBDAV')
+for key, value in {'enabled': 'true', 'port': '8080', 'host': '0.0.0.0',
+                   'debug': 'false', 'share_name': '/seafdav',
+                   'workers': '5', 'timeout': '1200'}.items():
+    cfg.set('WEBDAV', key, value)
+buf = io.StringIO(); cfg.write(buf)
+save(path, buf.getvalue())
+print('Pro 配置完成：SeaDoc / Wiki / Office / Metadata / SeaSearch / WebDAV。')
 PY
 cat > "$TARGET/compose.sh" <<'SH_HELPER'
 #!/usr/bin/env bash
@@ -673,6 +688,7 @@ cd "$(dirname "$0")"
 source ./common.sh
 load_env .env
 dc exec -T -e VERIFY_USERNAME -e VERIFY_PASSWORD -e VERIFY_TOKEN -e VERIFY_TIMEOUT \
+  -e VERIFY_WEBDAV_USERNAME -e VERIFY_WEBDAV_PASSWORD \
   seafile python3 - < verify.py
 PUBLIC_URL="$SEAFILE_SERVER_PROTOCOL://$SEAFILE_SERVER_HOSTNAME"
 [[ "$(curl --noproxy '*' --fail --silent --show-error --max-time 20 "$PUBLIC_URL/api2/ping/")" == *pong* ]] || fail '宿主机主地址验收失败'
@@ -685,7 +701,7 @@ import os
 import sys
 import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 import requests
 
 base = os.environ['SEAFILE_SERVER_PROTOCOL'] + '://' + os.environ['SEAFILE_SERVER_HOSTNAME']
@@ -751,6 +767,31 @@ try:
         raise CheckError('上传下载内容不一致')
     print('PASS 资料库创建、上传、下载内容校验', flush=True)
 
+    # The API token is not a WebDAV password. Use a dedicated password if supplied.
+    dav = requests.Session()
+    dav.trust_env = False
+    dav.auth = (os.getenv('VERIFY_WEBDAV_USERNAME') or username,
+                os.getenv('VERIFY_WEBDAV_PASSWORD') or password)
+    davroot = base + '/seafdav/'
+    def dav_request(method, path, expected, **kwargs):
+        r = dav.request(method, davroot + path, timeout=30, allow_redirects=False, **kwargs)
+        if r.status_code not in expected:
+            raise CheckError(f'WebDAV {method}: HTTP {r.status_code}')
+        return r
+    def dav_list():
+        dav_request('PROPFIND', '', (207,), headers={'Depth': '1'})
+        if dav_request('GET', quote(name) + '/check.txt', (200,)).content != payload:
+            raise CheckError('WebDAV 读取内容不一致')
+    wait('WebDAV 认证、PROPFIND、读取', dav_list)
+    dav_path = quote(name) + '/dav-check.txt'
+    dav_new = quote(name) + '/dav-moved.txt'
+    dav_request('PUT', dav_path, (201, 204), data=payload)
+    dav_request('MOVE', dav_path, (201, 204), headers={'Destination': davroot + dav_new, 'Overwrite': 'F'})
+    if dav_request('GET', dav_new, (200,)).content != payload:
+        raise CheckError('WebDAV 移动后内容不一致')
+    dav_request('DELETE', dav_new, (200, 204))
+    print('PASS WebDAV 写入、重命名、内容校验、删除', flush=True)
+
     meta = f'/api/v2.1/repos/{repo}/metadata/'
     request('PUT', meta, json={'enabled': True})
     views = request('GET', meta + 'views/').json()['views']
@@ -802,8 +843,9 @@ if failed:
     sys.exit(1)
 PY
 cat > "$TARGET/README.txt" <<EOF
-Seafile 13 Pro 部署（含 SeaSearch 全文搜索）
+Seafile 13 Pro 部署（含 SeaSearch 全文搜索、WebDAV）
 主地址: $SEAFILE_SERVER_PROTOCOL://$SEAFILE_SERVER_HOSTNAME
+WebDAV: $SEAFILE_SERVER_PROTOCOL://$SEAFILE_SERVER_HOSTNAME/seafdav/
 账号及随机初始密码: .env 的 INIT_SEAFILE_ADMIN_EMAIL / INIT_SEAFILE_ADMIN_PASSWORD
 ./deploy.sh 执行初始化；./verify.sh 业务验收；./compose.sh ps / logs 查看状态。
 PULL=1 ./deploy.sh 才主动刷新已有镜像；缺少镜像时 Compose 自动拉取。
@@ -814,6 +856,7 @@ PULL=1 ./deploy.sh 才主动刷新已有镜像；缺少镜像时 Compose 自动�
 外部反代必须转发 Host、X-Forwarded-Proto 及 WebSocket，配置实际代理来源到可信代理列表。
 验收会创建并删除测试资料库和 Wiki，回收站可能保留测试记录。
 改过管理员密码后用 VERIFY_USERNAME/VERIFY_PASSWORD 或 VERIFY_TOKEN；
+WebDAV 另可指定 VERIFY_WEBDAV_USERNAME/VERIFY_WEBDAV_PASSWORD（应用密码）。
 详细说明、测试边界与反代示例见仓库 README.md / docs/。
 EOF
 chmod 700 "$TARGET/compose.sh" "$TARGET/deploy.sh" "$TARGET/verify.sh"

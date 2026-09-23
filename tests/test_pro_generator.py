@@ -56,6 +56,8 @@ class ProGeneratorTests(unittest.TestCase):
         self.assertEqual(pg['type'], 'bind')
         self.assertTrue(pg['source'].endswith('/data/onlyoffice/postgresql'))
         self.assertIn('healthcheck', data['onlyoffice'])
+        self.assertEqual(data['seafile']['labels']['seafile-seafile13pro.4_handle'], '/seafdav/*')
+        self.assertEqual(data['seafile']['labels']['seafile-seafile13pro.4_handle.0_reverse_proxy'], '{{upstreams 8080}}')
         for path in self.target.glob('*.sh'):
             subprocess.run(['bash', '-n', str(path)], check=True)
         for path in self.target.glob('*.py'):
@@ -85,6 +87,7 @@ class ProGeneratorTests(unittest.TestCase):
         conf.mkdir()
         (conf / 'seahub_settings.py').write_text('CUSTOM = 42\n')
         (conf / 'seafevents.conf').write_text('[OTHER]\nkeep=true\n')
+        (conf / 'seafdav.conf').write_text('[WEBDAV]\nenabled = false\ncustom_option = keep\n')
         cmd = ['python3', str(self.target / 'configure.py'), str(conf)]
         for _ in range(2):
             subprocess.run(cmd, env=dict(self.env, **self.values()), check=True, capture_output=True)
@@ -93,6 +96,10 @@ class ProGeneratorTests(unittest.TestCase):
         self.assertEqual(text.count('# BEGIN SEAFILE13_PRO MANAGED'), 1)
         self.assertEqual(len(list(conf.glob('seahub_settings.py.before-deploy-*'))), 1)
         self.assertIn('[SEASEARCH]', (conf / 'seafevents.conf').read_text())
+        dav = (conf / 'seafdav.conf').read_text()
+        self.assertIn('enabled = true', dav)
+        self.assertIn('custom_option = keep', dav)
+        self.assertEqual(len(list(conf.glob('seafdav.conf.before-deploy-*'))), 1)
 
     def test_existing_data_refused(self):
         (self.target / 'data').mkdir(parents=True)

@@ -314,7 +314,7 @@ services:
     labels:
       caddy: "${CADDY_SITE}"
       caddy.reverse_proxy: "{{upstreams 80}}"
-      caddy.6_handle: "/seafdav*"
+      caddy.6_handle: "/seafdav/*"
       caddy.6_handle.0_reverse_proxy: "{{upstreams 8080}}"
       caddy.6_handle.0_reverse_proxy.header_up: "X-Forwarded-Proto ${SEAFILE_SERVER_PROTOCOL}"
     healthcheck:

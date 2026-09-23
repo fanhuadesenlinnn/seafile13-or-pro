@@ -48,6 +48,8 @@ Pro 另上传含随机正文标记的文件，调用全文检索 API 并确认�
 
 2026-09-23，macOS + OrbStack Linux ARM64：22 项回归、ShellCheck 与语法检查通过。CE 13.0.28、Pro 13.0.28 和 ONLYOFFICE 8.1.0.1 在 Docker 主机 Linux 文件系统上的空目录部署，两个版本上述自动业务检查均通过，包括 CE WebDAV/实际缩略图和 Pro 正文全文检索。运行中的挂载检查确认持久化数据使用部署目录下的 bind mount，没有匿名数据卷；Docker socket 是唯一的外部挂载。
 
+同日生产维护验证了 Pro 13.0.28 现有实例启用 WebDAV 后，公网 HTTPS 与局域网 HTTP 的 PROPFIND、PUT、GET、MOVE、DELETE 均正常；还将该实例遗留的五个 Docker 卷切换为项目 `data/` 绑定目录并核对服务健康。Pro 脚本随后补入 WebDAV 的首次部署配置与验收；该修改已通过离线生成、Compose 渲染和配置幂等回归，尚未再做一次全新 Pro 实例的端到端部署。
+
 macOS 共享目录测试明确复现 PostgreSQL 属主不兼容；初始化已加入提前报错。测试入口与完整日志保存在项目中，日志位于 Git 忽略的 `test-results/`。
 
 早期 CE 反代方案已通过独立 Nginx HTTPS 终止后的 API/WebDAV MOVE/缩略图/Metadata/Wiki 验收；该次使用项目命名卷存储 Office PostgreSQL，不能代替最终全目录挂载方案的验收。

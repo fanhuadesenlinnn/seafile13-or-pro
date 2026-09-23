@@ -62,6 +62,7 @@ class GeneratorTests(unittest.TestCase):
         self.assertIn('/var/lib/postgresql', {v['target'] for v in services['onlyoffice']['volumes']})
         self.assertIn('seafile-mc:', services['seafile']['image'])
         self.assertEqual(services['seafile']['labels']['seafile-seafile13ce.6_handle.0_reverse_proxy'], '{{upstreams 8080}}')
+        self.assertEqual(services['seafile']['labels']['seafile-seafile13ce.6_handle'], '/seafdav/*')
         self.assertEqual(services['thumbnail-server']['labels']['seafile-seafile13ce.4_handle'], '/thumbnail/*')
         self.assertEqual(services['thumbnail-server']['environment']['INNER_SEAHUB_SERVICE_URL'], 'http://seafile')
         self.assertEqual(services['seafile']['environment']['REDIS_PASSWORD'], services['redis']['environment']['REDIS_PASSWORD'])
